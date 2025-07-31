@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log File JSON Viewer</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; background: #f9f9f9; }
+    h1 { margin-bottom: 1em; }
+    .upload-btn { margin-bottom: 1em; }
+    table { border-collapse: collapse; width: 100%; background: #fff; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f2f2f2; }
+    tr:hover { background: #e6f7ff; cursor: pointer; }
+    th.time-col, td.time-col { min-width: 170px; white-space: nowrap; }
+    .modal {
+      display: none; position: fixed; z-index: 10; left: 0; top: 0; width: 100vw; height: 100vh;
+      background: rgba(0,0,0,0.4); align-items: center; justify-content: center;
+    }
+    .modal-content {
+      background: #fff; padding: 2em; border-radius: 8px; max-width: 600px; width: 90vw;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    .close-btn { float: right; font-size: 1.2em; cursor: pointer; color: #888; }
+    pre { background: #f4f4f4; padding: 1em; border-radius: 6px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <div style="display:flex; gap:2em; align-items:flex-start;">
+    <div id="fileListContainer" style="min-width:220px;max-width:300px;width:20vw;background:#f4f4f4;padding:1em 0.5em 1em 1em;border-radius:8px;box-shadow:0 1px 4px #0001;">
+      <h2 style="font-size:1.1em;margin-top:0;">Files</h2>
+      <ul id="fileList" style="list-style:none;padding:0;margin:0;"></ul>
+    </div>
+    <div style="flex:1;">
+      <h1>Harmony Log Viewer</h1>
+      <div style="margin-bottom:1em; padding: 1em 1.5em; border-radius: 12px; background: #f7fafc; box-shadow: 0 1px 4px #0001; display:flex; gap:1em; flex-wrap:wrap; align-items:center;">
+        <label>Level:
+          <select id="filterLevel">
+            <option value="">All</option>
+          </select>
+        </label>
+        <label>Message contains:
+          <input type="text" id="filterMessage" placeholder="Type to filter...">
+        </label>
+        <label>Module:
+          <select id="filterModule">
+            <option value="">All</option>
+          </select>
+        </label>
+        <label>Submodule:
+          <select id="filterSubmodule">
+            <option value="">All</option>
+          </select>
+        </label>
+        <label>Shard:
+          <select id="filterShard">
+            <option value="">All</option>
+          </select>
+        </label>
+        <button id="clearFilters">Clear</button>
+      </div>
+      <input class="upload-btn" type="file" id="fileInput" accept=".log,.txt,.jsonl" multiple>
+      <table id="logTable">
+        <thead>
+          <tr>
+            <th style="min-width:60px">#</th>
+            <th class="time-col">Time</th>
+            <th>Level</th>
+            <th>ShardID</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <div class="modal" id="modal">
+        <div class="modal-content">
+          <span class="close-btn" id="closeModal">&times;</span>
+          <h2>Log Entry Details</h2>
+          <pre id="jsonDetails"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="loadingOverlay" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,0.7);z-index:100;align-items:center;justify-content:center;">
+    <div style="background:#fff;padding:2em 2em 1.5em 2em;border-radius:10px;box-shadow:0 2px 12px #0002;min-width:300px;text-align:center;">
+      <div style="margin-bottom:1em;font-size:1.2em;">Loading file...</div>
+      <div style="width:100%;background:#eee;border-radius:6px;overflow:hidden;height:22px;">
+        <div id="progressBar" style="height:22px;width:0;background:#4bb1fa;transition:width 0.2s;"></div>
+      </div>
+      <div id="progressText" style="margin-top:0.5em;font-size:0.95em;color:#555;">0%</div>
+    </div>
+  </div>
+  <div id="errorOverlay" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,0,0,0.07);z-index:200;align-items:center;justify-content:center;">
+    <div style="background:#fff;padding:2em 2em 1.5em 2em;border-radius:10px;box-shadow:0 2px 12px #0002;min-width:320px;text-align:center;border:2px solid #e57373;">
+      <div style="font-size:1.3em;color:#d32f2f;margin-bottom:0.7em;"><b>Failed to load log file</b></div>
+      <div id="errorMessage" style="color:#b71c1c;font-size:1.05em;margin-bottom:1.2em;"></div>
+      <button onclick="document.getElementById('errorOverlay').style.display='none'" style="background:#e57373;color:#fff;border:none;padding:0.5em 1.5em;border-radius:5px;font-size:1em;cursor:pointer;">Close</button>
+    </div>
+  </div>
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const fileList = document.getElementById('fileList');
+    const logTableBody = document.querySelector('#logTable tbody');
+    const modal = document.getElementById('modal');
+    const closeModal = document.getElementById('closeModal');
+    const jsonDetails = document.getElementById('jsonDetails');
+    const filterLevel = document.getElementById('filterLevel');
+    const filterMessage = document.getElementById('filterMessage');
+    const filterModule = document.getElementById('filterModule');
+    const filterSubmodule = document.getElementById('filterSubmodule');
+    const filterShard = document.getElementById('filterShard');
+    const clearFilters = document.getElementById('clearFilters');
+    let logEntries = [];
+    let uniqueLevels = new Set();
+    let uniqueModules = new Set();
+    let uniqueSubmodules = new Set();
+    let uniqueShards = new Set();
+    // Map from module name to set of submodules
+    let moduleToSubmodules = {};
+    let loadedFiles = [];
+    let fileContents = {};
+    let currentFileName = null;
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const errorOverlay = document.getElementById('errorOverlay');
+    const errorMessage = document.getElementById('errorMessage');
+
+    function extractModuleParts(caller) {
+      // Try to extract module/submodule from caller path
+      if (!caller) return {module: '', submodule: ''};
+      // Example: /path/to/project/internal/utils/utils.go:207
+      // Module: utils, Submodule: internal/utils
+      const parts = caller.split('/');
+      if (parts.length < 2) return {module: '', submodule: ''};
+      const module = parts[parts.length-2];
+      const submodule = parts.slice(-3, -1).join('/');
+      return {module, submodule};
+    }
+
+    function updateLevelFilterOptions() {
+      filterLevel.innerHTML = '<option value="">All</option>';
+      Array.from(uniqueLevels).sort().forEach(level => {
+        filterLevel.innerHTML += `<option value="${level}">${level}</option>`;
+      });
+    }
+
+    function updateDropdownOptions(selectElem, values) {
+      selectElem.innerHTML = '<option value="">All</option>';
+      Array.from(values).sort().forEach(val => {
+        selectElem.innerHTML += `<option value="${val}">${val}</option>`;
+      });
+    }
+
+    function updateAllFilterOptions() {
+      updateDropdownOptions(filterLevel, uniqueLevels);
+      updateDropdownOptions(filterModule, uniqueModules);
+      // By default, show all submodules
+      updateDropdownOptions(filterSubmodule, uniqueSubmodules);
+      updateDropdownOptions(filterShard, uniqueShards);
+    }
+
+    function updateSubmoduleDropdownForModule(module) {
+      if (!module) {
+        // If no module selected, show all submodules
+        updateDropdownOptions(filterSubmodule, uniqueSubmodules);
+      } else {
+        const submods = moduleToSubmodules[module] || new Set();
+        updateDropdownOptions(filterSubmodule, submods);
+      }
+      filterSubmodule.value = '';
+    }
+
+    function renderTable() {
+      logTableBody.innerHTML = '';
+      const levelVal = filterLevel.value;
+      const msgVal = filterMessage.value.toLowerCase();
+      const moduleVal = filterModule.value;
+      const submoduleVal = filterSubmodule.value;
+      const shardVal = filterShard.value;
+      let rowNum = 1;
+      logEntries.forEach(obj => {
+        const timeRaw = obj.time || '';
+        let time = timeRaw;
+        if (timeRaw) {
+          // Try to parse and format as YYYY-MM-DD HH:MM:SS
+          const d = new Date(timeRaw);
+          if (!isNaN(d.getTime())) {
+            const pad = n => n.toString().padStart(2, '0');
+            time = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+          }
+        }
+        const level = obj.level || '';
+        const message = obj.message || '';
+        const shard = obj.shardID ?? obj.shard ?? '';
+        const caller = obj.caller || '';
+        const {module, submodule} = extractModuleParts(caller);
+        if (levelVal && level !== levelVal) return;
+        if (msgVal && !message.toLowerCase().includes(msgVal)) return;
+        if (moduleVal && module !== moduleVal) return;
+        if (submoduleVal && submodule !== submoduleVal) return;
+        if (shardVal && String(shard) !== shardVal) return;
+        const tr = document.createElement('tr');
+        let rowStyle = '';
+        if (level === 'error') rowStyle = 'color:#d32f2f;font-weight:bold;background:#fdeaea;';
+        else if (level === 'warn') rowStyle = 'color:#e67c00;font-weight:bold;background:#fff6e0;';
+        tr.innerHTML = `
+          <td>${rowNum}</td>
+          <td class="time-col">${time}</td>
+          <td>${level}</td>
+          <td>${shard}</td>
+          <td>${message}</td>
+        `;
+        if (rowStyle) tr.style = rowStyle;
+        tr.addEventListener('click', () => showDetails(obj));
+        logTableBody.appendChild(tr);
+        rowNum++;
+      });
+    }
+
+    function applyFilters() {
+      renderTable();
+    }
+
+    filterLevel.addEventListener('change', applyFilters);
+    filterMessage.addEventListener('input', applyFilters);
+    filterModule.addEventListener('change', function() {
+      updateSubmoduleDropdownForModule(filterModule.value);
+      applyFilters();
+    });
+    filterSubmodule.addEventListener('change', applyFilters);
+    filterShard.addEventListener('change', applyFilters);
+    clearFilters.addEventListener('click', () => {
+      filterLevel.value = '';
+      filterMessage.value = '';
+      filterModule.value = '';
+      filterSubmodule.value = '';
+      filterShard.value = '';
+      renderTable();
+    });
+
+    fileInput.addEventListener('change', function(e) {
+      hideError();
+      const files = Array.from(e.target.files);
+      loadedFiles = files;
+      fileContents = {};
+      fileList.innerHTML = '';
+      if (files.length === 0) {
+        logEntries = [];
+        renderTable();
+        return;
+      }
+      files.forEach((file, idx) => {
+        const li = document.createElement('li');
+        li.textContent = file.name;
+        li.style.cursor = 'pointer';
+        li.style.padding = '0.3em 0.5em';
+        li.style.borderRadius = '4px';
+        li.style.marginBottom = '2px';
+        li.setAttribute('data-filename', file.name);
+        li.addEventListener('click', () => {
+          selectFile(file.name);
+        });
+        fileList.appendChild(li);
+      });
+      // Auto-select the first file
+      selectFile(files[0].name);
+      // Read all files and cache their contents
+      files.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = function(event) {
+          fileContents[file.name] = event.target.result;
+          // If this file is currently selected, load it
+          if (file.name === currentFileName) {
+            loadLogFileContent(event.target.result);
+          }
+         // Analyze file for log level and color the list item
+         setTimeout(() => {
+           try {
+             let text = event.target.result;
+             // Try JSONL first
+             let lines = text.split(/\r?\n/);
+             let foundError = false, foundWarn = false;
+             for (let i = 0; i < lines.length; ++i) {
+               const line = lines[i];
+               if (!line.trim()) continue;
+               try {
+                 const obj = JSON.parse(line);
+                 if (obj.level === 'error') { foundError = true; break; }
+                 if (obj.level === 'warn') foundWarn = true;
+               } catch {}
+             }
+             if (!foundError && !foundWarn) {
+               // Try pretty-printed JSON objects
+               let buffer = '', depth = 0, inObject = false;
+               for (let i = 0; i < text.length; ++i) {
+                 const c = text[i];
+                 if (c === '{') { if (depth === 0) inObject = true; depth++; }
+                 if (inObject) buffer += c;
+                 if (c === '}') {
+                   depth--;
+                   if (depth === 0 && inObject) {
+                     try {
+                       const obj = JSON.parse(buffer);
+                       if (obj.level === 'error') { foundError = true; break; }
+                       if (obj.level === 'warn') foundWarn = true;
+                     } catch {}
+                     buffer = '';
+                     inObject = false;
+                   }
+                 }
+               }
+             }
+             const li = fileList.querySelector('li[data-filename="' + file.name.replace(/"/g, '\\"') + '"]');
+             if (li) {
+               if (foundError) {
+                 li.style.color = '#000';
+                 li.style.fontWeight = '';
+               } else if (foundWarn) {
+                 li.style.color = '#000';
+                 li.style.fontWeight = '';
+               } else {
+                 li.style.color = '#000';
+                 li.style.fontWeight = '';
+               }
+             }
+           } catch {}
+         }, 0);
+        };
+        reader.readAsText(file);
+      });
+    });
+
+    function selectFile(fileName) {
+      hideError();
+      currentFileName = fileName;
+      // Highlight selected file
+      Array.from(fileList.children).forEach(li => {
+        if (li.textContent === fileName) {
+          li.style.background = '#d0eaff';
+          li.style.fontWeight = 'bold';
+        } else {
+          li.style.background = '';
+          li.style.fontWeight = '';
+        }
+      });
+      if (fileContents[fileName]) {
+        loadLogFileContent(fileContents[fileName]);
+      }
+    }
+
+    function showError(msg) {
+      errorMessage.textContent = msg;
+      errorOverlay.style.display = 'flex';
+    }
+
+    function hideError() {
+      errorOverlay.style.display = 'none';
+    }
+
+    function loadLogFileContent(text) {
+      hideError();
+      // Show loading overlay
+      loadingOverlay.style.display = 'flex';
+      progressBar.style.width = '0%';
+      progressText.textContent = '0%';
+      // Try JSONL (one object per line)
+      let lines = text.split(/\r?\n/);
+      let objects = [];
+      let failedJSONL = false;
+      for (let i = 0; i < lines.length; ++i) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        try {
+          objects.push(JSON.parse(line));
+        } catch (err) {
+          failedJSONL = true;
+          break;
+        }
+      }
+      if (!failedJSONL && objects.length > 0) {
+        // Parsed as JSONL
+        parseObjectsWithProgress(objects);
+        return;
+      }
+      // Try pretty-printed JSON objects (multiple objects, not in array)
+      // Find all top-level objects using a stack
+      try {
+        objects = [];
+        let buffer = '';
+        let depth = 0;
+        let inObject = false;
+        for (let i = 0; i < text.length; ++i) {
+          const c = text[i];
+          if (c === '{') {
+            if (depth === 0) inObject = true;
+            depth++;
+          }
+          if (inObject) buffer += c;
+          if (c === '}') {
+            depth--;
+            if (depth === 0 && inObject) {
+              // End of object
+              try {
+                objects.push(JSON.parse(buffer));
+              } catch (err) {
+                showError('Failed to parse a JSON object. Please check the log file format.');
+                loadingOverlay.style.display = 'none';
+                return;
+              }
+              buffer = '';
+              inObject = false;
+            }
+          }
+        }
+        if (objects.length === 0) throw new Error('No JSON objects found.');
+        parseObjectsWithProgress(objects);
+        return;
+      } catch (err) {
+        showError('Could not parse the log file. Make sure it contains valid JSON objects, either one per line or pretty-printed.');
+        loadingOverlay.style.display = 'none';
+        return;
+      }
+    }
+
+    function parseObjectsWithProgress(objects) {
+      logEntries = [];
+      uniqueLevels = new Set();
+      uniqueModules = new Set();
+      uniqueSubmodules = new Set();
+      uniqueShards = new Set();
+      moduleToSubmodules = {};
+      let idx = 0;
+      const chunkSize = 1000;
+      function processChunk() {
+        const end = Math.min(idx + chunkSize, objects.length);
+        for (; idx < end; idx++) {
+          const obj = objects[idx];
+          if (!obj) continue;
+          try {
+            logEntries.push(obj);
+            if (obj.level) uniqueLevels.add(obj.level);
+            const caller = obj.caller || '';
+            const {module, submodule} = extractModuleParts(caller);
+            if (module) uniqueModules.add(module);
+            if (submodule) uniqueSubmodules.add(submodule);
+            if (module) {
+              if (!moduleToSubmodules[module]) moduleToSubmodules[module] = new Set();
+              if (submodule) moduleToSubmodules[module].add(submodule);
+            }
+            const shard = obj.shardID ?? obj.shard;
+            if (shard !== undefined && shard !== null && shard !== '') uniqueShards.add(String(shard));
+          } catch (err) {
+            // skip invalid objects
+          }
+        }
+        // Update progress
+        const percent = Math.round((idx / objects.length) * 100);
+        progressBar.style.width = percent + '%';
+        progressText.textContent = percent + '%';
+        if (idx < objects.length) {
+          setTimeout(processChunk, 0);
+        } else {
+          updateAllFilterOptions();
+          updateSubmoduleDropdownForModule(filterModule.value);
+          renderTable();
+          loadingOverlay.style.display = 'none';
+        }
+      }
+      processChunk();
+    }
+
+    function showDetails(obj) {
+      jsonDetails.textContent = JSON.stringify(obj, null, 2);
+      modal.style.display = 'flex';
+    }
+
+    closeModal.onclick = function() {
+      modal.style.display = 'none';
+    };
+    window.onclick = function(event) {
+      if (event.target === modal) {
+        modal.style.display = 'none';
+      }
+    };
+  </script>
+</body>
+</html> 
