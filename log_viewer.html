@@ -57,6 +57,10 @@
             <option value="">All</option>
           </select>
         </label>
+        <label style="display:flex; align-items:center; gap:0.5em;">
+          <input type="checkbox" id="filterAfterShutdown" style="margin:0;">
+          <span>After last shutdown</span>
+        </label>
         <button id="clearFilters">Clear</button>
       </div>
       <input class="upload-btn" type="file" id="fileInput" accept=".log,.txt,.jsonl" multiple>
@@ -110,6 +114,7 @@
     const filterModule = document.getElementById('filterModule');
     const filterSubmodule = document.getElementById('filterSubmodule');
     const filterShard = document.getElementById('filterShard');
+    const filterAfterShutdown = document.getElementById('filterAfterShutdown');
     const clearFilters = document.getElementById('clearFilters');
     let logEntries = [];
     let uniqueLevels = new Set();
@@ -179,8 +184,22 @@
       const moduleVal = filterModule.value;
       const submoduleVal = filterSubmodule.value;
       const shardVal = filterShard.value;
+      const afterShutdown = filterAfterShutdown.checked;
+      
+      // Find the last shutdown index if the filter is enabled
+      let lastShutdownIndex = -1;
+      if (afterShutdown) {
+        for (let i = logEntries.length - 1; i >= 0; i--) {
+          const entry = logEntries[i];
+          if (entry.message && entry.message.includes('Blockchain manager stopped')) {
+            lastShutdownIndex = i;
+            break;
+          }
+        }
+      }
+      
       let rowNum = 1;
-      logEntries.forEach(obj => {
+      logEntries.forEach((obj, index) => {
         const timeRaw = obj.time || '';
         let time = timeRaw;
         if (timeRaw) {
@@ -201,6 +220,7 @@
         if (moduleVal && module !== moduleVal) return;
         if (submoduleVal && submodule !== submoduleVal) return;
         if (shardVal && String(shard) !== shardVal) return;
+        if (afterShutdown && index <= lastShutdownIndex) return;
         const tr = document.createElement('tr');
         let rowStyle = '';
         if (level === 'error') rowStyle = 'color:#d32f2f;font-weight:bold;background:#fdeaea;';
@@ -231,12 +251,14 @@
     });
     filterSubmodule.addEventListener('change', applyFilters);
     filterShard.addEventListener('change', applyFilters);
+    filterAfterShutdown.addEventListener('change', applyFilters);
     clearFilters.addEventListener('click', () => {
       filterLevel.value = '';
       filterMessage.value = '';
       filterModule.value = '';
       filterSubmodule.value = '';
       filterShard.value = '';
+      filterAfterShutdown.checked = false;
       renderTable();
     });
 
