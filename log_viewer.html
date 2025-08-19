@@ -61,6 +61,18 @@
           <input type="checkbox" id="filterAfterShutdown" style="margin:0;">
           <span>After last shutdown</span>
         </label>
+        <div style="display:flex; align-items:center; gap:1em; margin-top:0.5em;">
+          <label style="display:flex; align-items:center; gap:0.5em;">
+            <span>Page size:</span>
+            <select id="pageSize" style="padding:0.2em;">
+              <option value="100">100</option>
+              <option value="500" selected>500</option>
+              <option value="1000">1,000</option>
+              <option value="5000">5,000</option>
+            </select>
+          </label>
+          <span id="paginationInfo" style="color:#666; font-size:0.9em;"></span>
+        </div>
         <button id="clearFilters">Clear</button>
       </div>
       <input class="upload-btn" type="file" id="fileInput" accept=".log,.txt,.jsonl" multiple>
@@ -76,6 +88,23 @@
         </thead>
         <tbody></tbody>
       </table>
+      
+      <!-- Pagination Controls -->
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1em; padding:1em; background:#f8f9fa; border-radius:8px;">
+        <div style="display:flex; align-items:center; gap:0.5em;">
+          <button id="firstPage" style="padding:0.5em 1em; border:1px solid #ddd; background:#fff; cursor:pointer; border-radius:4px;">« First</button>
+          <button id="prevPage" style="padding:0.5em 1em; border:1px solid #ddd; background:#fff; cursor:pointer; border-radius:4px;">‹ Prev</button>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.5em;">
+          <span>Page</span>
+          <input type="number" id="currentPage" min="1" style="width:60px; padding:0.3em; text-align:center; border:1px solid #ddd; border-radius:4px;">
+          <span>of <span id="totalPages">1</span></span>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.5em;">
+          <button id="nextPage" style="padding:0.5em 1em; border:1px solid #ddd; background:#fff; cursor:pointer; border-radius:4px;">Next ›</button>
+          <button id="lastPage" style="padding:0.5em 1em; border:1px solid #ddd; background:#fff; cursor:pointer; border-radius:4px;">Last »</button>
+        </div>
+      </div>
 
       <div class="modal" id="modal">
         <div class="modal-content">
@@ -89,6 +118,7 @@
   <div id="loadingOverlay" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(255,255,255,0.7);z-index:100;align-items:center;justify-content:center;">
     <div style="background:#fff;padding:2em 2em 1.5em 2em;border-radius:10px;box-shadow:0 2px 12px #0002;min-width:300px;text-align:center;">
       <div style="margin-bottom:1em;font-size:1.2em;">Loading file...</div>
+      <div id="loadingInfo" style="margin-bottom:1em;font-size:0.9em;color:#666;"></div>
       <div style="width:100%;background:#eee;border-radius:6px;overflow:hidden;height:22px;">
         <div id="progressBar" style="height:22px;width:0;background:#4bb1fa;transition:width 0.2s;"></div>
       </div>
@@ -115,6 +145,14 @@
     const filterSubmodule = document.getElementById('filterSubmodule');
     const filterShard = document.getElementById('filterShard');
     const filterAfterShutdown = document.getElementById('filterAfterShutdown');
+    const pageSize = document.getElementById('pageSize');
+    const paginationInfo = document.getElementById('paginationInfo');
+    const firstPage = document.getElementById('firstPage');
+    const prevPage = document.getElementById('prevPage');
+    const currentPage = document.getElementById('currentPage');
+    const totalPages = document.getElementById('totalPages');
+    const nextPage = document.getElementById('nextPage');
+    const lastPage = document.getElementById('lastPage');
     const clearFilters = document.getElementById('clearFilters');
     let logEntries = [];
     let uniqueLevels = new Set();
@@ -126,7 +164,16 @@
     let loadedFiles = [];
     let fileContents = {};
     let currentFileName = null;
+    
+    // Pagination state
+    let currentPageNum = 1;
+    let totalPagesCount = 1;
+    let filteredEntries = [];
+    
+    // Shutdown tracking
+    let lastShutdownIndex = -1;
     const loadingOverlay = document.getElementById('loadingOverlay');
+    const loadingInfo = document.getElementById('loadingInfo');
     const progressBar = document.getElementById('progressBar');
     const progressText = document.getElementById('progressText');
     const errorOverlay = document.getElementById('errorOverlay');
@@ -177,8 +224,10 @@
       filterSubmodule.value = '';
     }
 
-    function renderTable() {
+        function renderTable() {
       logTableBody.innerHTML = '';
+      
+      // Apply filters first
       const levelVal = filterLevel.value;
       const msgVal = filterMessage.value.toLowerCase();
       const moduleVal = filterModule.value;
@@ -186,20 +235,52 @@
       const shardVal = filterShard.value;
       const afterShutdown = filterAfterShutdown.checked;
       
-      // Find the last shutdown index if the filter is enabled
-      let lastShutdownIndex = -1;
-      if (afterShutdown) {
-        for (let i = logEntries.length - 1; i >= 0; i--) {
-          const entry = logEntries[i];
-          if (entry.message && entry.message.includes('Blockchain manager stopped')) {
-            lastShutdownIndex = i;
-            break;
-          }
+      // Filter entries
+      filteredEntries = logEntries.filter((obj, index) => {
+        const level = obj.level || '';
+        const message = obj.message || '';
+        const shard = obj.shardID ?? obj.shard ?? '';
+        const caller = obj.caller || '';
+        const {module, submodule} = extractModuleParts(caller);
+        
+        if (levelVal && level !== levelVal) return false;
+        if (msgVal && !message.toLowerCase().includes(msgVal)) return false;
+        if (moduleVal && module !== moduleVal) return false;
+        if (submoduleVal && submodule !== submoduleVal) return false;
+        if (shardVal && String(shard) !== shardVal) return false;
+        
+        // Check shutdown filter (use pre-calculated index)
+        if (afterShutdown && lastShutdownIndex !== -1 && index <= lastShutdownIndex) {
+          return false;
         }
+        
+        return true;
+      });
+      
+      // Update pagination
+      updatePagination();
+      
+      // If current page is beyond total pages, reset to first page
+      if (currentPageNum > totalPagesCount) {
+        currentPageNum = 1;
+        updatePagination();
       }
       
-      let rowNum = 1;
-      logEntries.forEach((obj, index) => {
+      // Render current page
+      renderCurrentPage();
+    }
+    
+    function renderCurrentPage() {
+      logTableBody.innerHTML = '';
+      
+      const pageSizeVal = parseInt(pageSize.value);
+      const startIndex = (currentPageNum - 1) * pageSizeVal;
+      const endIndex = Math.min(startIndex + pageSizeVal, filteredEntries.length);
+      
+      let rowNum = startIndex + 1;
+      
+      for (let i = startIndex; i < endIndex; i++) {
+        const obj = filteredEntries[i];
         const timeRaw = obj.time || '';
         let time = timeRaw;
         if (timeRaw) {
@@ -210,21 +291,16 @@
             time = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
           }
         }
+        
         const level = obj.level || '';
         const message = obj.message || '';
         const shard = obj.shardID ?? obj.shard ?? '';
-        const caller = obj.caller || '';
-        const {module, submodule} = extractModuleParts(caller);
-        if (levelVal && level !== levelVal) return;
-        if (msgVal && !message.toLowerCase().includes(msgVal)) return;
-        if (moduleVal && module !== moduleVal) return;
-        if (submoduleVal && submodule !== submoduleVal) return;
-        if (shardVal && String(shard) !== shardVal) return;
-        if (afterShutdown && index <= lastShutdownIndex) return;
+        
         const tr = document.createElement('tr');
         let rowStyle = '';
         if (level === 'error') rowStyle = 'color:#d32f2f;font-weight:bold;background:#fdeaea;';
         else if (level === 'warn') rowStyle = 'color:#e67c00;font-weight:bold;background:#fff6e0;';
+        
         tr.innerHTML = `
           <td>${rowNum}</td>
           <td class="time-col">${time}</td>
@@ -232,11 +308,44 @@
           <td>${shard}</td>
           <td>${message}</td>
         `;
+        
         if (rowStyle) tr.style = rowStyle;
         tr.addEventListener('click', () => showDetails(obj));
         logTableBody.appendChild(tr);
         rowNum++;
-      });
+      }
+    }
+    
+    function updatePagination() {
+      const pageSizeVal = parseInt(pageSize.value);
+      totalPagesCount = Math.ceil(filteredEntries.length / pageSizeVal);
+      
+      if (currentPageNum > totalPagesCount) {
+        currentPageNum = totalPagesCount || 1;
+      }
+      
+      totalPages.textContent = totalPagesCount;
+      currentPage.value = currentPageNum;
+      
+      // Update pagination info
+      const startIndex = (currentPageNum - 1) * pageSizeVal + 1;
+      const endIndex = Math.min(currentPageNum * pageSizeVal, filteredEntries.length);
+      let infoText = `Showing ${startIndex}-${endIndex} of ${filteredEntries.length} entries`;
+      
+      // Add shutdown filter info if active
+      if (filterAfterShutdown.checked && lastShutdownIndex !== -1) {
+        const totalAfterShutdown = logEntries.length - lastShutdownIndex - 1;
+        const filteredOut = logEntries.length - filteredEntries.length;
+        infoText += ` (showing ${totalAfterShutdown} entries after shutdown, filtered out ${filteredOut} entries)`;
+      }
+      
+      paginationInfo.textContent = infoText;
+      
+      // Update button states
+      firstPage.disabled = currentPageNum === 1;
+      prevPage.disabled = currentPageNum === 1;
+      nextPage.disabled = currentPageNum === totalPagesCount;
+      lastPage.disabled = currentPageNum === totalPagesCount;
     }
 
     function applyFilters() {
@@ -251,7 +360,74 @@
     });
     filterSubmodule.addEventListener('change', applyFilters);
     filterShard.addEventListener('change', applyFilters);
-    filterAfterShutdown.addEventListener('change', applyFilters);
+    filterAfterShutdown.addEventListener('change', function() {
+      // Reset to first page when filter changes
+      currentPageNum = 1;
+      
+      // Show notification about what's happening
+      if (this.checked && lastShutdownIndex !== -1) {
+        const totalAfterShutdown = logEntries.length - lastShutdownIndex - 1;
+        loadingInfo.textContent = `Filtering to show only ${totalAfterShutdown} entries after last shutdown...`;
+      } else if (!this.checked) {
+        loadingInfo.textContent = `Showing all ${logEntries.length} entries...`;
+      }
+      
+      applyFilters();
+      
+      // Clear the loading info after a short delay
+      setTimeout(() => {
+        if (loadingInfo.textContent.includes('Filtering') || loadingInfo.textContent.includes('Showing all')) {
+          loadingInfo.textContent = '';
+        }
+      }, 1000);
+    });
+    
+    // Pagination event listeners
+    pageSize.addEventListener('change', function() {
+      currentPageNum = 1;
+      updatePagination();
+      renderCurrentPage();
+    });
+    
+    firstPage.addEventListener('click', () => {
+      currentPageNum = 1;
+      updatePagination();
+      renderCurrentPage();
+    });
+    
+    prevPage.addEventListener('click', () => {
+      if (currentPageNum > 1) {
+        currentPageNum--;
+        updatePagination();
+        renderCurrentPage();
+      }
+    });
+    
+    nextPage.addEventListener('click', () => {
+      if (currentPageNum < totalPagesCount) {
+        currentPageNum++;
+        updatePagination();
+        renderCurrentPage();
+      }
+    });
+    
+    lastPage.addEventListener('click', () => {
+      currentPageNum = totalPagesCount;
+      updatePagination();
+      renderCurrentPage();
+    });
+    
+    currentPage.addEventListener('change', function() {
+      const newPage = parseInt(this.value);
+      if (newPage >= 1 && newPage <= totalPagesCount) {
+        currentPageNum = newPage;
+        updatePagination();
+        renderCurrentPage();
+      } else {
+        this.value = currentPageNum;
+      }
+    });
+    
     clearFilters.addEventListener('click', () => {
       filterLevel.value = '';
       filterMessage.value = '';
@@ -259,6 +435,7 @@
       filterSubmodule.value = '';
       filterShard.value = '';
       filterAfterShutdown.checked = false;
+      currentPageNum = 1;
       renderTable();
     });
 
@@ -385,84 +562,72 @@
       hideError();
       // Show loading overlay
       loadingOverlay.style.display = 'flex';
+      loadingInfo.textContent = '';
       progressBar.style.width = '0%';
       progressText.textContent = '0%';
-      // Try JSONL (one object per line)
+      
+      // Fast line counting first (without parsing)
       let lines = text.split(/\r?\n/);
-      let objects = [];
-      let failedJSONL = false;
-      for (let i = 0; i < lines.length; ++i) {
-        const line = lines[i];
-        if (!line.trim()) continue;
-        try {
-          objects.push(JSON.parse(line));
-        } catch (err) {
-          failedJSONL = true;
-          break;
+      let lineCount = 0;
+      let validLineIndices = [];
+      
+      // Count valid lines and store their indices
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line && line.startsWith('{') && line.endsWith('}')) {
+          validLineIndices.push(i);
+          lineCount++;
         }
       }
-      if (!failedJSONL && objects.length > 0) {
-        // Parsed as JSONL
-        parseObjectsWithProgress(objects);
-        return;
-      }
-      // Try pretty-printed JSON objects (multiple objects, not in array)
-      // Find all top-level objects using a stack
-      try {
-        objects = [];
-        let buffer = '';
-        let depth = 0;
-        let inObject = false;
-        for (let i = 0; i < text.length; ++i) {
-          const c = text[i];
-          if (c === '{') {
-            if (depth === 0) inObject = true;
-            depth++;
-          }
-          if (inObject) buffer += c;
-          if (c === '}') {
-            depth--;
-            if (depth === 0 && inObject) {
-              // End of object
-              try {
-                objects.push(JSON.parse(buffer));
-              } catch (err) {
-                showError('Failed to parse a JSON object. Please check the log file format.');
-                loadingOverlay.style.display = 'none';
-                return;
-              }
-              buffer = '';
-              inObject = false;
-            }
-          }
-        }
-        if (objects.length === 0) throw new Error('No JSON objects found.');
-        parseObjectsWithProgress(objects);
-        return;
-      } catch (err) {
-        showError('Could not parse the log file. Make sure it contains valid JSON objects, either one per line or pretty-printed.');
+      
+      if (lineCount === 0) {
+        showError('No valid JSON lines found in the file.');
         loadingOverlay.style.display = 'none';
         return;
       }
+      
+      loadingInfo.textContent = `Processing ${lineCount} lines...`;
+      
+      // Process all lines efficiently (no more 100K limit)
+      processLinesEfficiently(lines, validLineIndices, 0, lineCount);
     }
-
-    function parseObjectsWithProgress(objects) {
+    
+    function processLinesEfficiently(lines, validLineIndices, startIndex, totalLinesToProcess) {
+      // Initialize data structures
       logEntries = [];
       uniqueLevels = new Set();
       uniqueModules = new Set();
       uniqueSubmodules = new Set();
       uniqueShards = new Set();
       moduleToSubmodules = {};
-      let idx = 0;
-      const chunkSize = 1000;
+      
+      // Reset shutdown index for new file
+      lastShutdownIndex = -1;
+      
+      let processedCount = 0;
+      let currentProgress = 0;
+      
+      // Process lines in chunks for smooth UI updates
+      const chunkSize = 5000; // Increased for better performance
+      let currentChunkStart = 0;
+      
       function processChunk() {
-        const end = Math.min(idx + chunkSize, objects.length);
-        for (; idx < end; idx++) {
-          const obj = objects[idx];
-          if (!obj) continue;
+        const chunkEnd = Math.min(currentChunkStart + chunkSize, totalLinesToProcess);
+        
+        for (let i = currentChunkStart; i < chunkEnd; i++) {
+          const lineIndex = validLineIndices[startIndex + i];
+          const line = lines[lineIndex];
+          
           try {
+            const obj = JSON.parse(line);
+            if (!obj) continue;
+            
+            // Add to log entries
             logEntries.push(obj);
+            
+            // Extract and store unique values
             if (obj.level) uniqueLevels.add(obj.level);
+            
             const caller = obj.caller || '';
             const {module, submodule} = extractModuleParts(caller);
             if (module) uniqueModules.add(module);
@@ -471,27 +636,58 @@
               if (!moduleToSubmodules[module]) moduleToSubmodules[module] = new Set();
               if (submodule) moduleToSubmodules[module].add(submodule);
             }
+            
             const shard = obj.shardID ?? obj.shard;
             if (shard !== undefined && shard !== null && shard !== '') uniqueShards.add(String(shard));
+            
+            // Check for shutdown message (store globally for reuse)
+            if (obj.message && obj.message.includes('Blockchain manager stopped')) {
+              lastShutdownIndex = processedCount;
+            }
+            
+            processedCount++;
           } catch (err) {
-            // skip invalid objects
+            // Skip invalid lines
+            processedCount++;
           }
         }
-        // Update progress
-        const percent = Math.round((idx / objects.length) * 100);
-        progressBar.style.width = percent + '%';
-        progressText.textContent = percent + '%';
-        if (idx < objects.length) {
-          setTimeout(processChunk, 0);
+        
+        // Update progress (cap at 100%)
+        currentProgress = Math.min(Math.round((processedCount / totalLinesToProcess) * 100), 100);
+        progressBar.style.width = currentProgress + '%';
+        progressText.textContent = currentProgress + '%';
+        
+        // Process next chunk or finish
+        if (processedCount < totalLinesToProcess) {
+          currentChunkStart = chunkEnd;
+          requestAnimationFrame(processChunk);
         } else {
+          // Finished processing
           updateAllFilterOptions();
           updateSubmoduleDropdownForModule(filterModule.value);
+          
+          // Reset pagination
+          currentPageNum = 1;
+          updatePagination();
+          
+          // Render first page
           renderTable();
           loadingOverlay.style.display = 'none';
+          
+          // Show info about shutdown detection
+          if (lastShutdownIndex !== -1) {
+            loadingInfo.textContent = `Found shutdown message at line ${lastShutdownIndex + 1} of ${totalLinesToProcess} processed lines. Use "After last shutdown" filter to see only recent logs.`;
+          } else {
+            loadingInfo.textContent = `No shutdown message found in ${totalLinesToProcess} processed lines. All logs are from current session.`;
+          }
         }
       }
+      
+      // Start processing
       processChunk();
     }
+
+
 
     function showDetails(obj) {
       jsonDetails.textContent = JSON.stringify(obj, null, 2);
